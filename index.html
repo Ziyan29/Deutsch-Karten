@@ -405,6 +405,47 @@
 </head>
 <body>
 
+<div id="gate" style="display:none;position:fixed;inset:0;background:#0f1117;z-index:999;
+  display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px">
+  <div style="font-size:18px;font-weight:700;color:#4f8ef7;letter-spacing:0.5px">Deutsch Karten</div>
+  <div style="font-size:13px;color:#7a82a0;margin-bottom:4px">请输入访问密码</div>
+  <input id="gate-input" type="password" placeholder="密码"
+    style="width:240px;padding:10px 14px;font-size:15px;border-radius:8px;
+    border:1px solid #2e3350;background:#1a1d27;color:#e0e4f0;outline:none;text-align:center"
+    onkeydown="if(event.key==='Enter')checkGate()">
+  <button onclick="checkGate()"
+    style="width:240px;padding:10px;font-size:14px;border-radius:8px;border:none;
+    background:#4f8ef7;color:#fff;cursor:pointer;font-weight:600">进入</button>
+  <div id="gate-err" style="font-size:12px;color:#e5534b;min-height:16px"></div>
+</div>
+
+<script>
+(function() {
+  const PASS_HASH = '7b75b9527be48da455a17f335491576dff504194aef17cc7b011dd0368b1da2e';
+  async function sha256(str) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+  }
+  const stored = sessionStorage.getItem('dk_auth');
+  if (stored === PASS_HASH) { return; }
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('gate').style.display = 'flex';
+  window.checkGate = async function() {
+    const val = document.getElementById('gate-input').value;
+    const h = await sha256(val);
+    if (h === PASS_HASH) {
+      sessionStorage.setItem('dk_auth', h);
+      document.getElementById('gate').style.display = 'none';
+      document.getElementById('app').style.display = 'flex';
+    } else {
+      document.getElementById('gate-err').textContent = '密码错误，请重试';
+      document.getElementById('gate-input').value = '';
+      document.getElementById('gate-input').focus();
+    }
+  };
+})();
+</script>
+
 <div id="app">
   <nav>
     <div class="logo">Deutsch Karten</div>
