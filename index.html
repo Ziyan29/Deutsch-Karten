@@ -77,6 +77,82 @@
   h1 { font-size: 20px; font-weight: 700; margin-bottom: 20px; }
   h2 { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
 
+  /* ── Mobile layout ── */
+  @media (max-width: 600px) {
+    #app { flex-direction: column; }
+
+    nav {
+      width: 100%;
+      min-width: unset;
+      border-right: none;
+      border-top: 1px solid var(--border);
+      order: 2;
+      flex-direction: row;
+      padding: 0;
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 50;
+      background: var(--surface);
+    }
+
+    nav .logo { display: none; }
+    nav .sync-area { display: none; }
+
+    nav button {
+      flex: 1;
+      text-align: center;
+      padding: 10px 4px 8px;
+      font-size: 11px;
+      border-radius: 0;
+      border-top: 2px solid transparent;
+    }
+
+    nav button.active {
+      border-top-color: var(--accent);
+      background: none;
+      color: var(--accent);
+    }
+
+    main {
+      order: 1;
+      padding: 16px 14px 80px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    h1 { font-size: 17px; margin-bottom: 14px; }
+
+    .card-area { max-width: 100%; }
+
+    .flashcard {
+      min-height: 200px;
+      padding: 28px 20px;
+    }
+
+    .card-word { font-size: 28px; }
+    .card-meaning { font-size: 18px; }
+
+    .rating-row { gap: 7px; margin-top: 16px; }
+    .rating-btn { padding: 10px 10px; font-size: 12px; flex: 1; }
+
+    .word-table { font-size: 12px; }
+    .word-table th, .word-table td { padding: 7px 6px; }
+    .word-table th:nth-child(5),
+    .word-table td:nth-child(5),
+    .word-table th:nth-child(6),
+    .word-table td:nth-child(6) { display: none; }
+
+    .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .stat-card { padding: 14px; }
+    .stat-card .value { font-size: 22px; }
+
+    .modal { padding: 20px 16px; }
+
+    input[type="text"], select, textarea { font-size: 16px; }
+  }
+
   /* ── Stats Cards ── */
   .stats-grid {
     display: grid;
@@ -412,7 +488,7 @@
     <button onclick="showView('words')" id="nav-words">单词本</button>
     <button onclick="showView('stats')" id="nav-stats">学习统计</button>
     <button onclick="showView('import')" id="nav-import">导入单词</button>
-    <div style="margin-top:auto;padding:16px 20px;font-size:11px">
+    <div class="sync-area" style="margin-top:auto;padding:16px 20px;font-size:11px">
       <span id="sync-indicator" style="color:var(--green)">云同步已启用</span>
     </div>
   </nav>
