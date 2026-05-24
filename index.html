@@ -529,7 +529,10 @@ async function initWords() {
   } catch {}
 
   // Pull from Gist and merge (remote wins on progress, local wins on new words)
-  const remote = await pullFromGist();
+  const remote = await Promise.race([
+    pullFromGist(),
+    new Promise(r => setTimeout(() => r(null), 8000))
+  ]);
   if (remote && Array.isArray(remote.words) && remote.words.length > 0) {
     const localMap = new Map(localRows.map(w => [w.id, w]));
     const remoteMap = new Map(remote.words.map(w => [w.id, w]));
@@ -605,8 +608,6 @@ function removeWordsFromDB(ids) {
     ids.forEach(id => store.delete(id));
   });
   schedulePush();
-}
-
 }
 
 // ── Gist Sync ─────────────────────────────────────────────────────────────────
