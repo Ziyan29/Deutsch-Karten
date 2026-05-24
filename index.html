@@ -421,26 +421,21 @@
 
 <script>
 (function() {
-  const PASS_HASH = '7b75b9527be48da455a17f335491576dff504194aef17cc7b011dd0368b1da2e';
-  async function sha256(str) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-  }
+  const PASS = 'Konrad';
   const gate = document.getElementById('gate');
   const app  = document.getElementById('app');
   const stored = sessionStorage.getItem('dk_auth');
-  if (stored === PASS_HASH) {
+  if (stored === PASS) {
     gate.style.display = 'none';
     app.style.display  = 'flex';
   } else {
     gate.style.display = 'flex';
     app.style.display  = 'none';
   }
-  window.checkGate = async function() {
+  window.checkGate = function() {
     const val = document.getElementById('gate-input').value;
-    const h = await sha256(val);
-    if (h === PASS_HASH) {
-      sessionStorage.setItem('dk_auth', h);
+    if (val === PASS) {
+      sessionStorage.setItem('dk_auth', PASS);
       gate.style.display = 'none';
       app.style.display  = 'flex';
     } else {
