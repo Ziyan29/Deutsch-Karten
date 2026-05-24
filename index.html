@@ -412,6 +412,13 @@
     <button onclick="showView('words')" id="nav-words">单词本</button>
     <button onclick="showView('stats')" id="nav-stats">学习统计</button>
     <button onclick="showView('import')" id="nav-import">导入单词</button>
+    <div style="margin-top:auto;padding:16px 20px;font-size:11px">
+      <span id="sync-indicator" style="color:var(--text-dim)"></span>
+      <div style="margin-top:8px">
+        <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;width:100%"
+          onclick="promptGistToken()">同步设置</button>
+      </div>
+    </div>
   </nav>
   <main id="view"></main>
 </div>
@@ -493,41 +500,66 @@ const dbReady = new Promise((resolve, reject) => {
   req.onerror   = e => reject(e.target.error);
 });
 
-// Load all words from IndexedDB into cache (called once at startup)
+// Load all words from IndexedDB into cache, then merge from Gist
 async function initWords() {
   await dbReady;
-  return new Promise((resolve, reject) => {
+  // Load local IndexedDB
+  let localRows = await new Promise((resolve, reject) => {
     const tx = _db.transaction(IDB_STORE, 'readonly');
     const req = tx.objectStore(IDB_STORE).getAll();
-    req.onsuccess = e => {
-      let rows = e.target.result || [];
-      // One-time migration: pull any words from old localStorage store
-      try {
-        const legacy = JSON.parse(localStorage.getItem('dk_words'));
-        if (Array.isArray(legacy) && legacy.length > 0) {
-          const existingIds = new Set(rows.map(r => r.id));
-          const migrants = legacy.filter(w => !existingIds.has(w.id));
-          if (migrants.length > 0) {
-            const mtx = _db.transaction(IDB_STORE, 'readwrite');
-            const store = mtx.objectStore(IDB_STORE);
-            migrants.forEach(w => store.put(w));
-            mtx.oncomplete = () => {
-              localStorage.removeItem('dk_words');
-              rows = rows.concat(migrants);
-              _wordsCache = rows;
-              resolve(rows);
-            };
-            mtx.onerror = () => { _wordsCache = rows; resolve(rows); };
-            return;
-          }
-          localStorage.removeItem('dk_words');
-        }
-      } catch {}
-      _wordsCache = rows;
-      resolve(rows);
-    };
-    req.onerror = e => reject(e.target.error);
+    req.onsuccess = e => resolve(e.target.result || []);
+    req.onerror   = e => reject(e.target.error);
   });
+
+  // One-time migration from old localStorage
+  try {
+    const legacy = JSON.parse(localStorage.getItem('dk_words'));
+    if (Array.isArray(legacy) && legacy.length > 0) {
+      const existingIds = new Set(localRows.map(r => r.id));
+      const migrants = legacy.filter(w => !existingIds.has(w.id));
+      if (migrants.length > 0) {
+        const mtx = _db.transaction(IDB_STORE, 'readwrite');
+        const store = mtx.objectStore(IDB_STORE);
+        migrants.forEach(w => store.put(w));
+        await new Promise(r => { mtx.oncomplete = r; mtx.onerror = r; });
+        localRows = localRows.concat(migrants);
+      }
+      localStorage.removeItem('dk_words');
+    }
+  } catch {}
+
+  // Pull from Gist and merge (remote wins on progress, local wins on new words)
+  const remote = await pullFromGist();
+  if (remote && Array.isArray(remote.words) && remote.words.length > 0) {
+    const localMap = new Map(localRows.map(w => [w.id, w]));
+    const remoteMap = new Map(remote.words.map(w => [w.id, w]));
+    // Merge: take whichever has more repetitions
+    for (const [id, rw] of remoteMap) {
+      const lw = localMap.get(id);
+      if (!lw || (rw.repetitions || 0) >= (lw.repetitions || 0)) {
+        localMap.set(id, rw);
+      }
+    }
+    // Add any local-only words not in remote
+    for (const [id, lw] of localMap) {
+      if (!remoteMap.has(id)) localMap.set(id, lw);
+    }
+    localRows = Array.from(localMap.values());
+    // Persist merged result to IndexedDB
+    const mtx = _db.transaction(IDB_STORE, 'readwrite');
+    const store = mtx.objectStore(IDB_STORE);
+    store.clear();
+    localRows.forEach(w => store.put(w));
+    await new Promise(r => { mtx.oncomplete = r; mtx.onerror = r; });
+    // Merge streaks too
+    if (Array.isArray(remote.streaks)) {
+      const merged = [...new Set([...loadStreaks(), ...remote.streaks])];
+      saveStreaks(merged);
+    }
+  }
+
+  _wordsCache = localRows;
+  return localRows;
 }
 
 // Synchronous read from in-memory cache (safe after initWords resolves)
@@ -544,6 +576,7 @@ function saveWords(w) {
     store.clear();
     w.forEach(word => store.put(word));
   });
+  schedulePush();
 }
 
 // Persist a single updated word (efficient for review ratings)
@@ -552,6 +585,7 @@ function persistWord(word) {
     const tx = _db.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).put(word);
   });
+  schedulePush();
 }
 
 // Remove a single word by id
@@ -560,6 +594,7 @@ function removeWordFromDB(id) {
     const tx = _db.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).delete(id);
   });
+  schedulePush();
 }
 
 // Remove multiple words by id array
@@ -569,6 +604,92 @@ function removeWordsFromDB(ids) {
     const store = tx.objectStore(IDB_STORE);
     ids.forEach(id => store.delete(id));
   });
+  schedulePush();
+}
+
+}
+
+// ── Gist Sync ─────────────────────────────────────────────────────────────────
+const GIST_ID   = '59c0d034c3bac4829e42b41b9fa8efe2';
+const GIST_FILE = 'dk_words.json';
+let _syncTimer  = null;
+let _syncStatus = 'idle';
+
+function getGistToken() {
+  return localStorage.getItem('dk_gist_token') || '';
+}
+
+function schedulePush() {
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(pushToGist, 3000);
+}
+
+async function pushToGist() {
+  const token = getGistToken();
+  if (!token) return;
+  _syncStatus = 'syncing';
+  updateSyncIndicator();
+  try {
+    const payload = JSON.stringify({
+      words: loadWords(),
+      streaks: loadStreaks(),
+      savedAt: new Date().toISOString()
+    });
+    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ files: { [GIST_FILE]: { content: payload } } })
+    });
+    _syncStatus = res.ok ? 'ok' : 'error';
+  } catch {
+    _syncStatus = 'error';
+  }
+  updateSyncIndicator();
+  setTimeout(() => { if (_syncStatus !== 'syncing') { _syncStatus = 'idle'; updateSyncIndicator(); } }, 3000);
+}
+
+async function pullFromGist() {
+  const token = getGistToken();
+  if (!token) return null;
+  try {
+    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      headers: { 'Authorization': `token ${token}` }
+    });
+    if (!res.ok) return null;
+    const gist = await res.json();
+    const content = gist.files?.[GIST_FILE]?.content;
+    if (!content) return null;
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function updateSyncIndicator() {
+  const el = document.getElementById('sync-indicator');
+  if (!el) return;
+  const map = { idle: getGistToken() ? '云同步已启用' : '未配置同步', syncing: '同步中…', ok: '已同步', error: '同步失败' };
+  const col = { idle: getGistToken() ? 'var(--green)' : 'var(--text-dim)', syncing: 'var(--yellow)', ok: 'var(--green)', error: 'var(--red)' };
+  el.textContent = map[_syncStatus];
+  el.style.color = col[_syncStatus];
+}
+
+function promptGistToken() {
+  const cur = getGistToken();
+  const val = prompt('输入 GitHub Token（ghp_ 开头）用于云同步。\n留空并确认可清除已保存的 Token。', cur);
+  if (val === null) return;
+  if (val.trim()) {
+    localStorage.setItem('dk_gist_token', val.trim());
+    toast('Token 已保存，正在同步…');
+    pushToGist();
+  } else {
+    localStorage.removeItem('dk_gist_token');
+    toast('已清除 Token，同步已关闭');
+  }
+  updateSyncIndicator();
 }
 
 function loadStreaks() {
