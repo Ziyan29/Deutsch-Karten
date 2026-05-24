@@ -413,11 +413,7 @@
     <button onclick="showView('stats')" id="nav-stats">学习统计</button>
     <button onclick="showView('import')" id="nav-import">导入单词</button>
     <div style="margin-top:auto;padding:16px 20px;font-size:11px">
-      <span id="sync-indicator" style="color:var(--text-dim)"></span>
-      <div style="margin-top:8px">
-        <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;width:100%"
-          onclick="promptGistToken()">同步设置</button>
-      </div>
+      <span id="sync-indicator" style="color:var(--green)">云同步已启用</span>
     </div>
   </nav>
   <main id="view"></main>
@@ -528,35 +524,33 @@ async function initWords() {
     }
   } catch {}
 
-  // Pull from Gist and merge (remote wins on progress, local wins on new words)
+  // Pull from Supabase and merge (remote wins on progress, local wins on new words)
   const remote = await Promise.race([
-    pullFromGist(),
-    new Promise(r => setTimeout(() => r(null), 8000))
+    sbFetchAllWords(),
+    new Promise(r => setTimeout(() => r(null), 10000))
   ]);
-  if (remote && Array.isArray(remote.words) && remote.words.length > 0) {
+  if (remote && Array.isArray(remote) && remote.length > 0) {
     const localMap = new Map(localRows.map(w => [w.id, w]));
-    const remoteMap = new Map(remote.words.map(w => [w.id, w]));
-    // Merge: take whichever has more repetitions
+    const remoteMap = new Map(remote.map(w => [w.id, w]));
     for (const [id, rw] of remoteMap) {
       const lw = localMap.get(id);
       if (!lw || (rw.repetitions || 0) >= (lw.repetitions || 0)) {
         localMap.set(id, rw);
       }
     }
-    // Add any local-only words not in remote
     for (const [id, lw] of localMap) {
       if (!remoteMap.has(id)) localMap.set(id, lw);
     }
     localRows = Array.from(localMap.values());
-    // Persist merged result to IndexedDB
     const mtx = _db.transaction(IDB_STORE, 'readwrite');
     const store = mtx.objectStore(IDB_STORE);
     store.clear();
     localRows.forEach(w => store.put(w));
     await new Promise(r => { mtx.oncomplete = r; mtx.onerror = r; });
-    // Merge streaks too
-    if (Array.isArray(remote.streaks)) {
-      const merged = [...new Set([...loadStreaks(), ...remote.streaks])];
+    // Merge streaks
+    const remoteStreaks = await sbPullStreaks();
+    if (Array.isArray(remoteStreaks)) {
+      const merged = [...new Set([...loadStreaks(), ...remoteStreaks])];
       saveStreaks(merged);
     }
   }
@@ -588,7 +582,7 @@ function persistWord(word) {
     const tx = _db.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).put(word);
   });
-  schedulePush();
+  schedulePush(word);
 }
 
 // Remove a single word by id
@@ -597,7 +591,7 @@ function removeWordFromDB(id) {
     const tx = _db.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).delete(id);
   });
-  schedulePush();
+  sbDeleteWord(id);
 }
 
 // Remove multiple words by id array
@@ -607,91 +601,150 @@ function removeWordsFromDB(ids) {
     const store = tx.objectStore(IDB_STORE);
     ids.forEach(id => store.delete(id));
   });
-  schedulePush();
+  sbDeleteWords(ids);
 }
 
-// ── Gist Sync ─────────────────────────────────────────────────────────────────
-const GIST_ID   = '59c0d034c3bac4829e42b41b9fa8efe2';
-const GIST_FILE = 'dk_words.json';
+// ── Supabase Sync ─────────────────────────────────────────────────────────────
+const SB_URL = 'https://ernairanmichfjlbcrtd.supabase.co';
+const SB_KEY = 'sb_publishable_ZuPl2frZz3N1AssqfSuHGA_VeuEf9R2';
 let _syncTimer  = null;
 let _syncStatus = 'idle';
 
-function getGistToken() {
-  return localStorage.getItem('dk_gist_token') || '';
+function sbHeaders() {
+  return {
+    'apikey': SB_KEY,
+    'Authorization': `Bearer ${SB_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'resolution=merge-duplicates'
+  };
 }
 
-function schedulePush() {
-  clearTimeout(_syncTimer);
-  _syncTimer = setTimeout(pushToGist, 3000);
+function wordToRow(w) {
+  return {
+    id:            w.id,
+    word:          w.word,
+    article:       w.article || '',
+    pos:           w.pos || '',
+    meaning:       w.meaning,
+    example:       w.example || '',
+    tags:          w.tags || [],
+    interval:      w.interval || 0,
+    repetitions:   w.repetitions || 0,
+    ease_factor:   w.easeFactor || 2.5,
+    due_date:      w.dueDate || null,
+    last_reviewed: w.lastReviewed || null
+  };
 }
 
-async function pushToGist() {
-  const token = getGistToken();
-  if (!token) return;
-  _syncStatus = 'syncing';
-  updateSyncIndicator();
-  try {
-    const payload = JSON.stringify({
-      words: loadWords(),
-      streaks: loadStreaks(),
-      savedAt: new Date().toISOString()
-    });
-    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `token ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ files: { [GIST_FILE]: { content: payload } } })
-    });
-    _syncStatus = res.ok ? 'ok' : 'error';
-  } catch {
-    _syncStatus = 'error';
-  }
-  updateSyncIndicator();
-  setTimeout(() => { if (_syncStatus !== 'syncing') { _syncStatus = 'idle'; updateSyncIndicator(); } }, 3000);
+function rowToWord(r) {
+  return {
+    id:           r.id,
+    word:         r.word,
+    article:      r.article || '',
+    pos:          r.pos || '',
+    meaning:      r.meaning,
+    example:      r.example || '',
+    tags:         r.tags || [],
+    interval:     r.interval || 0,
+    repetitions:  r.repetitions || 0,
+    easeFactor:   r.ease_factor || 2.5,
+    dueDate:      r.due_date || null,
+    lastReviewed: r.last_reviewed || null
+  };
 }
 
-async function pullFromGist() {
-  const token = getGistToken();
-  if (!token) return null;
-  try {
-    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      headers: { 'Authorization': `token ${token}` }
-    });
+async function sbFetchAllWords() {
+  const allRows = [];
+  const pageSize = 1000;
+  let offset = 0;
+  while (true) {
+    const res = await fetch(
+      `${SB_URL}/rest/v1/words?select=*&order=id&limit=${pageSize}&offset=${offset}`,
+      { headers: sbHeaders() }
+    );
     if (!res.ok) return null;
-    const gist = await res.json();
-    const content = gist.files?.[GIST_FILE]?.content;
-    if (!content) return null;
-    return JSON.parse(content);
-  } catch {
-    return null;
+    const rows = await res.json();
+    allRows.push(...rows);
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+  return allRows.map(rowToWord);
+}
+
+async function sbUpsertWord(w) {
+  await fetch(`${SB_URL}/rest/v1/words`, {
+    method: 'POST',
+    headers: sbHeaders(),
+    body: JSON.stringify(wordToRow(w))
+  });
+}
+
+async function sbUpsertWords(ws) {
+  const batchSize = 500;
+  for (let i = 0; i < ws.length; i += batchSize) {
+    const batch = ws.slice(i, i + batchSize).map(wordToRow);
+    const res = await fetch(`${SB_URL}/rest/v1/words`, {
+      method: 'POST',
+      headers: sbHeaders(),
+      body: JSON.stringify(batch)
+    });
+    if (!res.ok) return false;
+  }
+  return true;
+}
+
+async function sbDeleteWord(id) {
+  await fetch(`${SB_URL}/rest/v1/words?id=eq.${encodeURIComponent(id)}`, {
+    method: 'DELETE', headers: sbHeaders()
+  });
+}
+
+async function sbDeleteWords(ids) {
+  const inList = ids.map(id => `"${id}"`).join(',');
+  await fetch(`${SB_URL}/rest/v1/words?id=in.(${inList})`, {
+    method: 'DELETE', headers: sbHeaders()
+  });
+}
+
+async function sbPullStreaks() {
+  const res = await fetch(`${SB_URL}/rest/v1/streaks?id=eq.1`, { headers: sbHeaders() });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return rows[0]?.dates || null;
+}
+
+async function sbPushStreaks(dates) {
+  await fetch(`${SB_URL}/rest/v1/streaks`, {
+    method: 'POST',
+    headers: sbHeaders(),
+    body: JSON.stringify({ id: 1, dates })
+  });
+}
+
+function schedulePush(word) {
+  if (word) {
+    sbUpsertWord(word).then(() => { _syncStatus = 'ok'; updateSyncIndicator(); setTimeout(() => { _syncStatus = 'idle'; updateSyncIndicator(); }, 2000); });
+  } else {
+    clearTimeout(_syncTimer);
+    _syncTimer = setTimeout(async () => {
+      _syncStatus = 'syncing'; updateSyncIndicator();
+      const ok = await sbUpsertWords(loadWords());
+      _syncStatus = ok ? 'ok' : 'error'; updateSyncIndicator();
+      setTimeout(() => { _syncStatus = 'idle'; updateSyncIndicator(); }, 2000);
+    }, 1500);
   }
 }
 
 function updateSyncIndicator() {
   const el = document.getElementById('sync-indicator');
   if (!el) return;
-  const map = { idle: getGistToken() ? '云同步已启用' : '未配置同步', syncing: '同步中…', ok: '已同步', error: '同步失败' };
-  const col = { idle: getGistToken() ? 'var(--green)' : 'var(--text-dim)', syncing: 'var(--yellow)', ok: 'var(--green)', error: 'var(--red)' };
+  const map = { idle: '云同步已启用', syncing: '同步中…', ok: '已同步', error: '同步失败' };
+  const col = { idle: 'var(--green)', syncing: 'var(--yellow)', ok: 'var(--green)', error: 'var(--red)' };
   el.textContent = map[_syncStatus];
-  el.style.color = col[_syncStatus];
+  el.style.color  = col[_syncStatus];
 }
 
-function promptGistToken() {
-  const cur = getGistToken();
-  const val = prompt('输入 GitHub Token（ghp_ 开头）用于云同步。\n留空并确认可清除已保存的 Token。', cur);
-  if (val === null) return;
-  if (val.trim()) {
-    localStorage.setItem('dk_gist_token', val.trim());
-    toast('Token 已保存，正在同步…');
-    pushToGist();
-  } else {
-    localStorage.removeItem('dk_gist_token');
-    toast('已清除 Token，同步已关闭');
-  }
-  updateSyncIndicator();
-}
+
 
 function loadStreaks() {
   try { return JSON.parse(localStorage.getItem(STORE_STREAKS)) || []; }
