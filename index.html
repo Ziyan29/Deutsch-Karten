@@ -838,6 +838,7 @@ function markTodayActive() {
   if (!streaks.includes(today)) {
     streaks.push(today);
     saveStreaks(streaks);
+    sbPushStreaks(streaks);
   }
 }
 
